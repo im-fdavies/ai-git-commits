@@ -44,11 +44,6 @@ detect_tests_from_files() {
     return
   fi
 
-  # Matches:
-  # - any path under test/, tests/, __tests__/
-  # - *Test.php, *Tests.php
-  # - *.test.(js/ts/jsx/tsx)
-  # - *.spec.(js/ts/jsx/tsx)
   if printf "%s\n" "$files" | grep -E -q \
     '(^|/)(tests?|__tests__)/|Test\.php$|Tests\.php$|\.test\.(js|ts|jsx|tsx)$|\.spec\.(js|ts|jsx|tsx)$'
   then
@@ -60,6 +55,7 @@ detect_tests_from_files() {
 
 # Auto-detect a sensible base branch
 detect_base_branch() {
+  # Honour PR_BASE_BRANCH if the user wants per-shell default
   if [[ -n "${PR_BASE_BRANCH:-}" ]]; then
     echo "$PR_BASE_BRANCH"
     return
@@ -99,8 +95,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ---------- Repo + branch ----------
-
 log_info "Starting..."
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -125,7 +119,6 @@ JIRA_BASE_URL="${JIRA_BASE_URL:-https://immediateco.atlassian.net}"
 # ---------- Base branch detection + confirmation ----------
 
 AUTO_BASE_BRANCH=$(detect_base_branch)
-
 BASE_BRANCH=""
 
 if [[ -n "$AUTO_BASE_BRANCH" ]]; then
@@ -192,12 +185,21 @@ echo
 read -r -p "PR Type? (Feature/Bugfix) [F/B]: " PR_TYPE_INPUT
 PR_TYPE_LOWER=$(printf "%s" "$PR_TYPE_INPUT" | tr '[:upper:]' '[:lower:]')
 
-if [[ -z "$PR_TYPE_LOWER" || "$PR_TYPE_LOWER" == "f" || "$PR_TYPE_LOWER" == "feature" ]]; then
+if [[ -z "$PR_TYPE_LOWER" || "$PR_TYPE_LOWER" == "f" || "$PR_TYPE_LOVER" == "feature" ]]; then
   PR_TYPE="Feature"
 elif [[ "$PR_TYPE_LOWER" == "b" || "$PR_TYPE_LOWER" == "bug" || "$PR_TYPE_LOWER" == "bugfix" ]]; then
   PR_TYPE="Bugfix"
 else
   PR_TYPE="$PR_TYPE_INPUT"
+fi
+
+BUG_DESCRIPTION=""
+
+if [[ "$PR_TYPE" == "Bugfix" ]]; then
+  echo
+  echo "Describe the bug this PR fixes (WHAT was broken and WHY it mattered)."
+  echo "Keep it short; 1–3 sentences. End with Ctrl+D:"
+  BUG_DESCRIPTION=$(</dev/stdin || true)
 fi
 
 read -r -p "Includes Formatting? (Y/N): " INCLUDES_FORMATTING_RAW
@@ -211,18 +213,18 @@ AI_TITLE=""
 if [[ "$NO_AI" = false && -n "${OPENAI_API_KEY:-}" ]]; then
   echo "Generating AI summary and title (this may take a moment)..."
 
-  # Summary
+  # Summary: focus on WHAT + WHY; ignore noise
   REQUEST_JSON_SUMMARY=$(jq -n --arg diff "$SHORT_DIFF" '
     {
       model: "gpt-4.1-mini",
       messages: [
         {
           "role": "system",
-          "content": "You are a senior engineer writing a concise and practical pull request description. Include two sections: Summary and Implementation details. Only include a Risks section if there are genuine, concrete risks relevant to reviewers. Avoid generic or obvious risks."
+          "content": "You write very concise, low-noise pull request descriptions. Focus on WHAT and WHY, not how. Keep it under 3 short paragraphs or 6 bullet points total. Focus only on meaningful behavioural or domain changes. Ignore cosmetic changes, refactors that do not alter behaviour, code reordering, or moving functions without changing what they do. Ignore dependency and package version bumps, lockfile changes, and tooling configuration updates unless they are the primary purpose of the PR. Do not list files or line-by-line changes. Only include a brief Risks section if there are specific, concrete risks reviewers should know about; otherwise omit risks entirely."
         },
         {
           "role": "user",
-          "content": ("Generate a PR description for this git diff:\n\n" + $diff)
+          "content": ("Based on this git diff, describe WHAT is changing and WHY it is changing. Avoid generic statements and avoid restating obvious risks:\n\n" + $diff)
         }
       ]
     }
@@ -275,11 +277,11 @@ if [[ "$NO_AI" = false && -n "${OPENAI_API_KEY:-}" ]]; then
         messages: [
           {
             "role": "system",
-            "content": "You generate extremely short, human-readable pull request titles. Keep them under 80 characters where possible. Avoid marketing or hype language; be clear and factual."
+            "content": "You generate short, clear pull request titles (ideally under 70 characters). The title should capture the main behavioural change or purpose. Do NOT mention tests, formatting, refactors, or dependency/package bumps in the title unless the entire PR is solely about those. Never mention package.json, lockfiles, or specific version numbers unless upgrading that dependency is the primary goal."
           },
           {
             "role": "user",
-            "content": ("Generate a concise PR title based on this summary:\n\n" + $summary)
+            "content": ("Generate a concise PR title from this description, focusing on WHAT and WHY:\n\n" + $summary)
           }
         ]
       }
@@ -346,21 +348,29 @@ fi
 # ---------- Human description prompt (after AI) ----------
 
 echo
-echo "Write your PR description / notes (optional, end with Ctrl+D):"
+echo "Add any extra context / notes (optional, end with Ctrl+D):"
 PR_DESCRIPTION_HUMAN=$(</dev/stdin || true)
 
 # Combine descriptions:
+# - Bug description (for bugfix PRs)
 # - Your notes (if any)
-# - Blank line
-# - AI summary (if any, no heading)
-PR_DESCRIPTION="$PR_DESCRIPTION_HUMAN"
+# - AI summary (if any)
+PR_DESCRIPTION=""
+
+if [[ "$PR_TYPE" == "Bugfix" && -n "$BUG_DESCRIPTION" ]]; then
+  PR_DESCRIPTION+="**Bug being fixed**\n\n$BUG_DESCRIPTION\n"
+fi
+
+if [[ -n "$PR_DESCRIPTION_HUMAN" ]]; then
+  if [[ -n "$PR_DESCRIPTION" ]]; then
+    PR_DESCRIPTION+="\n"
+  fi
+  PR_DESCRIPTION+="$PR_DESCRIPTION_HUMAN"
+fi
 
 if [[ -n "$AI_SUMMARY" ]]; then
   if [[ -n "$PR_DESCRIPTION" ]]; then
-    PR_DESCRIPTION+="
-
-$AI_SUMMARY
-"
+    PR_DESCRIPTION+="\n\n$AI_SUMMARY"
   else
     PR_DESCRIPTION="$AI_SUMMARY"
   fi

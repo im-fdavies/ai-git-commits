@@ -19,26 +19,18 @@ log_debug() {
 
 # ---------- Helpers ----------
 
-# Normalise Y/N-style answers to uppercase "Y" or "N"
 normalize_yn() {
   local raw="$1"
   local upper
   upper=$(printf "%s" "$raw" | tr '[:lower:]' '[:upper:]')
-
   case "$upper" in
-    Y|YES)
-      echo "Y"
-      ;;
-    *)
-      echo "N"
-      ;;
+    Y|YES) echo "Y" ;;
+    *)     echo "N" ;;
   esac
 }
 
-# Detect whether tests are included based on changed file paths
 detect_tests_from_files() {
   local files="$1"
-
   if [[ -z "$files" ]]; then
     echo "N"
     return
@@ -53,9 +45,7 @@ detect_tests_from_files() {
   fi
 }
 
-# Auto-detect a sensible base branch
 detect_base_branch() {
-  # Honour PR_BASE_BRANCH if the user wants per-shell default
   if [[ -n "${PR_BASE_BRANCH:-}" ]]; then
     echo "$PR_BASE_BRANCH"
     return
@@ -68,7 +58,7 @@ detect_base_branch() {
     fi
   done
 
-  echo ""  # no obvious base
+  echo ""
 }
 
 # ---------- Flag parsing ----------
@@ -105,13 +95,12 @@ fi
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 log_info "Current branch: $BRANCH"
 
-# Jira ticket from branch (e.g. feature/FAB-62044-whatever)
 if [[ "$BRANCH" =~ (FAB-[0-9]+) ]]; then
   TICKET="${BASH_REMATCH[1]}"
   log_info "Detected Jira ticket: $TICKET"
 else
   echo "Could not detect Jira ticket from branch."
-  read -r -p "Enter Jira ticket (e.g. FAB-62044): " TICKET
+  read -r -p "Enter Jira ticket (e.g. FAB-62044, leave blank for none): " TICKET
 fi
 
 JIRA_BASE_URL="${JIRA_BASE_URL:-https://immediateco.atlassian.net}"
@@ -175,17 +164,16 @@ SHORT_DIFF=$(printf "%s" "$DIFF" | head -c 16000)
 log_debug "Changed files list:"
 log_debug "$CHANGED_FILES"
 
-# Auto-detect tests
 INCLUDES_TESTS=$(detect_tests_from_files "$CHANGED_FILES")
 log_info "Auto-detected Includes Tests? -> $INCLUDES_TESTS"
 
-# ---------- PR type + formatting flag ----------
+# ---------- PR type + formatting flag + optional bug description ----------
 
 echo
 read -r -p "PR Type? (Feature/Bugfix) [F/B]: " PR_TYPE_INPUT
 PR_TYPE_LOWER=$(printf "%s" "$PR_TYPE_INPUT" | tr '[:upper:]' '[:lower:]')
 
-if [[ -z "$PR_TYPE_LOWER" || "$PR_TYPE_LOWER" == "f" || "$PR_TYPE_LOVER" == "feature" ]]; then
+if [[ -z "$PR_TYPE_LOWER" || "$PR_TYPE_LOWER" == "f" || "$PR_TYPE_LOWER" == "feature" ]]; then
   PR_TYPE="Feature"
 elif [[ "$PR_TYPE_LOWER" == "b" || "$PR_TYPE_LOWER" == "bug" || "$PR_TYPE_LOWER" == "bugfix" ]]; then
   PR_TYPE="Bugfix"
@@ -198,8 +186,7 @@ BUG_DESCRIPTION=""
 if [[ "$PR_TYPE" == "Bugfix" ]]; then
   echo
   echo "Describe the bug this PR fixes (WHAT was broken and WHY it mattered)."
-  echo "Keep it short; 1–3 sentences. End with Ctrl+D:"
-  BUG_DESCRIPTION=$(</dev/stdin || true)
+  read -r -p "Bug description (one short line): " BUG_DESCRIPTION
 fi
 
 read -r -p "Includes Formatting? (Y/N): " INCLUDES_FORMATTING_RAW
@@ -213,22 +200,22 @@ AI_TITLE=""
 if [[ "$NO_AI" = false && -n "${OPENAI_API_KEY:-}" ]]; then
   echo "Generating AI summary and title (this may take a moment)..."
 
-  # Summary: focus on WHAT + WHY; ignore noise
-  REQUEST_JSON_SUMMARY=$(jq -n --arg diff "$SHORT_DIFF" '
-    {
-      model: "gpt-4.1-mini",
-      messages: [
-        {
-          "role": "system",
-          "content": "You write very concise, low-noise pull request descriptions. Focus on WHAT and WHY, not how. Keep it under 3 short paragraphs or 6 bullet points total. Focus only on meaningful behavioural or domain changes. Ignore cosmetic changes, refactors that do not alter behaviour, code reordering, or moving functions without changing what they do. Ignore dependency and package version bumps, lockfile changes, and tooling configuration updates unless they are the primary purpose of the PR. Do not list files or line-by-line changes. Only include a brief Risks section if there are specific, concrete risks reviewers should know about; otherwise omit risks entirely."
-        },
-        {
-          "role": "user",
-          "content": ("Based on this git diff, describe WHAT is changing and WHY it is changing. Avoid generic statements and avoid restating obvious risks:\n\n" + $diff)
-        }
-      ]
-    }
-  ')
+  REQUEST_JSON_TITLE=$(jq -n --arg summary "$AI_SUMMARY" '
+  {
+    model: "gpt-4.1-mini",
+    max_tokens: 40,
+    messages: [
+      {
+        "role": "system",
+        "content": "You generate very short, neutral pull request titles. Output ONE single-line title only, no explanations. Aim for 60 characters or fewer. Use simple, technical language in imperative or factual style (e.g. \"Update commit helper for one-line messages\"). Avoid marketing or emotive words like improve, enhance, better, clearer, concise, robust, streamlined, powerful, elegant. Avoid double adjectives and avoid using \"and\" unless strictly necessary. Do NOT mention tests, formatting, or dependency bumps unless that is the sole purpose of the PR."
+      },
+      {
+        "role": "user",
+        "content": ("Generate a concise PR title from this description, focusing on WHAT changes and, briefly, WHY:\n\n" + $summary)
+      }
+    ]
+  }
+')
 
   AI_RESPONSE_SUMMARY=$(printf "%s" "$REQUEST_JSON_SUMMARY" | curl -s https://api.openai.com/v1/chat/completions \
     -H "Authorization: Bearer $OPENAI_API_KEY" \
@@ -267,7 +254,6 @@ if [[ "$NO_AI" = false && -n "${OPENAI_API_KEY:-}" ]]; then
     [ "$VERBOSITY" -ge 1 ] && echo "AI summary request failed; continuing without it."
   fi
 
-  # Title (only if we have a summary)
   if [[ -n "$AI_SUMMARY" ]]; then
     log_info "Generating AI PR title from summary…"
 
@@ -318,6 +304,18 @@ if [[ "$NO_AI" = false && -n "${OPENAI_API_KEY:-}" ]]; then
         [ "$VERBOSITY" -ge 1 ] && echo "AI title unavailable: ${FULL_MSG_TITLE#ERROR_FROM_API: }"
       elif [[ -n "$FULL_MSG_TITLE" ]]; then
         AI_TITLE=$(printf "%s" "$FULL_MSG_TITLE" | head -n1)
+
+        # Trim whitespace
+        AI_TITLE=$(printf "%s" "$AI_TITLE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        # Drop trailing full stop
+        AI_TITLE=${AI_TITLE%.}
+
+        # Hard cap length (just in case)
+        if [ "${#AI_TITLE}" -gt 80 ]; then
+          AI_TITLE="${AI_TITLE:0:77}..."
+        fi
+
         log_info "AI suggested PR title: $AI_TITLE"
       fi
     else
@@ -351,10 +349,8 @@ echo
 echo "Add any extra context / notes (optional, end with Ctrl+D):"
 PR_DESCRIPTION_HUMAN=$(</dev/stdin || true)
 
-# Combine descriptions:
-# - Bug description (for bugfix PRs)
-# - Your notes (if any)
-# - AI summary (if any)
+# ---------- Combine descriptions ----------
+
 PR_DESCRIPTION=""
 
 if [[ "$PR_TYPE" == "Bugfix" && -n "$BUG_DESCRIPTION" ]]; then
@@ -378,10 +374,15 @@ fi
 
 # ---------- Build final PR body ----------
 
+JIRA_ROW=""
+if [[ -n "$TICKET" ]]; then
+  JIRA_ROW="| Jira Ticket                | [${TICKET}](${JIRA_BASE_URL}/browse/${TICKET})"
+fi
+
 PR_BODY=$(cat <<EOF
 | Q                          | A
 | -------------------------- | ---
-| Jira Ticket                | [${TICKET}](${JIRA_BASE_URL}/browse/${TICKET})
+${JIRA_ROW}
 | PR Type? (Feature/Bugfix)  | ${PR_TYPE}
 | Includes Tests? (Y/N)      | ${INCLUDES_TESTS}
 | Includes Formatting? (Y/N) | ${INCLUDES_FORMATTING}
